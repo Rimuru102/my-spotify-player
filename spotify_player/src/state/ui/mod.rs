@@ -37,6 +37,16 @@ impl std::fmt::Debug for ImageRenderInfo {
     }
 }
 
+/// The rect of the currently-focused list/table widget, plus how many rows
+/// at the top of that rect are a header row (1 for `Table` widgets that use
+/// `.header(...)`, 0 for plain `List` widgets) rather than actual items.
+/// Used to translate a mouse click into an exact item index.
+#[derive(Debug, Clone, Copy)]
+pub struct ActiveListRect {
+    pub rect: ratatui::layout::Rect,
+    pub header_rows: u16,
+}
+
 /// Application's UI state
 #[derive(Debug)]
 pub struct UIState {
@@ -51,6 +61,19 @@ pub struct UIState {
     /// The rectangle representing the playback progress bar,
     /// which is mainly used to handle mouse click events (for seeking command)
     pub playback_progress_bar_rect: ratatui::layout::Rect,
+    /// The main content rect (below/above the playback window, whichever way
+    /// it's docked), recomputed every frame. Coarse fallback for mouse hit-testing.
+    pub content_area_rect: ratatui::layout::Rect,
+    /// The exact rect of whichever list/table widget is currently focused,
+    /// captured at the point it's actually rendered (inside borders, below
+    /// any header row/description line). `None` if the current page has no
+    /// focusable list (e.g. Lyrics page). Reset every frame before rendering,
+    /// so a stale rect from a previous page can't leak into hit-testing.
+    pub active_list_rect: Option<ActiveListRect>,
+    /// Terminal coordinates of the last right-click, if a popup opened because
+    /// of it. Lets the popup render anchored at the click instead of always
+    /// docking to the bottom of the screen. Cleared once the popup closes.
+    pub mouse_popup_anchor: Option<(u16, u16)>,
 
     /// Count prefix for vim-style navigation (e.g., 5j, 10k)
     pub count_prefix: Option<usize>,
@@ -86,6 +109,39 @@ impl UIState {
             }
         }
         self.history.push(page);
+    }
+
+    /// Switch to a page, reusing an existing instance of the same `PageType`
+    /// already in history (moving it to the top) instead of always pushing a
+    /// fresh one. Intended for "singleton" pages that don't carry a unique ID
+    /// - Library, Search, Browse, Queue, CommandHelp, Logs - so jumping back
+    /// and forth (e.g. via F-key shortcuts) behaves like switching tabs:
+    /// bounded history instead of growing forever, and scroll
+    /// position/focus is preserved rather than reset every time.
+    ///
+    /// `Context` pages are intentionally NOT switched this way: they're
+    /// parameterized by a specific playlist/album/artist id, and drilling
+    /// from one into another is the normal, desired way `history` grows.
+    ///
+    /// Returns `true` if a fresh page was created (so the caller knows
+    /// whether it needs to kick off a data-fetch request), `false` if an
+    /// existing page was reused.
+    pub fn switch_to_page(
+        &mut self,
+        page_type: PageType,
+        make_default: impl FnOnce() -> PageState,
+    ) -> bool {
+        self.popup = None;
+        if let Some(pos) = self.history.iter().position(|p| p.page_type() == page_type) {
+            if pos != self.history.len() - 1 {
+                let page = self.history.remove(pos);
+                self.history.push(page);
+            }
+            false
+        } else {
+            self.history.push(make_default());
+            true
+        }
     }
 
     /// Return whether there exists a focused popup.
@@ -129,6 +185,9 @@ impl Default for UIState {
             popup: None,
 
             playback_progress_bar_rect: Rect::default(),
+            content_area_rect: Rect::default(),
+            active_list_rect: None,
+            mouse_popup_anchor: None,
 
             count_prefix: None,
 

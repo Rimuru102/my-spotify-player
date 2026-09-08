@@ -7,6 +7,7 @@ use chrono_humanize::HumanTime;
 use ratatui::text::Line;
 
 use crate::{state::Episode, utils::format_duration};
+use crate::state::ActiveListRect;
 
 use super::{
     config, utils, utils::construct_and_render_block, Album, Alignment, Artist, ArtistFocusState,
@@ -224,6 +225,19 @@ pub fn render_search_page(
     };
 
     // 4. Render the page's widgets
+    // Record the precise rect of whichever of the 6 lists is currently
+    // focused, for mouse click hit-testing (see mod.rs's handle_mouse_event).
+    if is_active {
+        ui.active_list_rect = match focus_state {
+            SearchFocusState::Tracks => Some(ActiveListRect { rect: track_rect, header_rows: 0 }),
+            SearchFocusState::Albums => Some(ActiveListRect { rect: album_rect, header_rows: 0 }),
+            SearchFocusState::Artists => Some(ActiveListRect { rect: artist_rect, header_rows: 0 }),
+            SearchFocusState::Playlists => Some(ActiveListRect { rect: playlist_rect, header_rows: 0 }),
+            SearchFocusState::Shows => Some(ActiveListRect { rect: show_rect, header_rows: 0 }),
+            SearchFocusState::Episodes => Some(ActiveListRect { rect: episode_rect, header_rows: 0 }),
+            SearchFocusState::Input => None,
+        };
+    }
     // Need mutable access to the list/table states stored inside the page state for rendering.
     let PageState::Search {
         state: page_state,
@@ -530,6 +544,16 @@ pub fn render_library_page(
     );
 
     // 4. Render the page's widgets
+    // Record the precise rect of whichever of the 3 lists is currently
+    // focused, for mouse click hit-testing (see mod.rs's handle_mouse_event).
+    if is_playlist_active {
+        ui.active_list_rect = Some(ActiveListRect { rect: playlist_rect, header_rows: 0 });
+    } else if is_album_active {
+        ui.active_list_rect = Some(ActiveListRect { rect: album_rect, header_rows: 0 });
+    } else if is_artist_active {
+        ui.active_list_rect = Some(ActiveListRect { rect: artist_rect, header_rows: 0 });
+    }
+
     // Render the library page's windows.
     // Will need mutable access to the list/table states stored inside the page state for rendering.
     let PageState::Library { state: page_state } = ui.current_page_mut() else {
@@ -615,6 +639,12 @@ pub fn render_browse_page(
     };
 
     // 4. Render the page's widget
+    // Record the precise rect of this list for mouse click hit-testing (see
+    // mod.rs's handle_mouse_event), captured after border/title has already
+    // been carved out of `rect` above.
+    if is_active {
+        ui.active_list_rect = Some(ActiveListRect { rect, header_rows: 0 });
+    }
     let Some(MutableWindowState::List(list_state)) = ui.current_page_mut().focus_window_state_mut()
     else {
         return;
@@ -980,6 +1010,19 @@ fn render_artist_context_page_windows(
     };
 
     // 4. Render the page's widgets
+    // Record the precise rect of whichever of the two bottom-row widgets is
+    // currently focused. (Top tracks / liked songs are handled inside
+    // render_track_table itself, called just below.)
+    // NOTE: is_artist_active is recomputed here rather than reused from the
+    // artist_list block above, since that binding is scoped to that block
+    // only and isn't visible down here.
+    let is_artist_active = is_active && focus_state == ArtistFocusState::RelatedArtists;
+    if is_albums_active {
+        ui.active_list_rect = Some(ActiveListRect { rect: albums_rect, header_rows: 1 });
+    } else if is_artist_active {
+        ui.active_list_rect = Some(ActiveListRect { rect: related_artists_rect, header_rows: 0 });
+    }
+
     render_track_table(
         frame,
         top_tracks_rect,
@@ -1036,6 +1079,13 @@ fn render_track_table(
     data: &DataReadGuard,
     is_artist_liked_songs: bool,
 ) {
+    // Record the precise rect of this table for mouse click hit-testing (see
+    // mod.rs's handle_mouse_event), before any layout is further subdivided.
+    // header_rows: 1 because this Table always renders a .header() row.
+    if is_active {
+        ui.active_list_rect = Some(ActiveListRect { rect, header_rows: 1 });
+    }
+
     let configs = config::get_config();
     // get the current playing track's URI to decorate such track (if exists) in the track table
     let mut playing_track_uri = String::new();
@@ -1200,6 +1250,12 @@ fn render_episode_table(
     episodes: Vec<&Episode>,
     ui: &mut UIStateGuard,
 ) {
+    // Record the precise rect of this table for mouse click hit-testing.
+    // header_rows: 1 because this Table always renders a .header() row.
+    if is_active {
+        ui.active_list_rect = Some(ActiveListRect { rect, header_rows: 1 });
+    }
+
     let configs = config::get_config();
     // get the current playing episode's URI to decorate such episode (if exists) in the episode table
     let mut playing_episode_uri = String::new();

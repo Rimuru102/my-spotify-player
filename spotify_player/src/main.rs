@@ -107,52 +107,85 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
         }
     }
 
-    // create a Spotify API client
-    let client = client::AppClient::new()
-        .await
-        .context("construct app client")?;
-    client
-        .new_session(Some(state), true)
-        .await
-        .context("initialize new Spotify session")?;
-
-    // request user data
-    client_pub.send(client::ClientRequest::GetCurrentUser)?;
-    client_pub.send(client::ClientRequest::GetUserPlaylists)?;
-    client_pub.send(client::ClientRequest::GetUserFollowedArtists)?;
-    client_pub.send(client::ClientRequest::GetUserSavedAlbums)?;
-    client_pub.send(client::ClientRequest::GetContext(state::ContextId::Tracks(
-        state::USER_LIKED_TRACKS_ID.to_owned(),
-    )))?;
-    client_pub.send(client::ClientRequest::GetUserSavedShows)?;
-
-    // client socket task (for handling CLI commands)
+    // --- CUSTOM PATCH START: don't block startup on Spotify auth/session ---
+    // `AppClient::new()` (token prompt/refresh) and `client.new_session()`
+    // (credential handshake +, if streaming is enabled, a full librespot
+    // connect) are both network round-trips. Previously this function
+    // `.await`ed them right here, *before* the terminal was even initialized
+    // further down - meaning the whole app sat there with nothing on screen
+    // until both finished. Neither the UI thread nor the terminal event
+    // handler actually touch `client` (only `state` and `client_pub`), so
+    // there's no real reason to gate them on this. We move the whole
+    // client/session setup into a background task instead: the terminal now
+    // initializes immediately below, and the client-dependent tasks (CLI
+    // socket, the actual request handler, session watcher) start as soon as
+    // auth finishes, a moment later, in the background. Any `ClientRequest`
+    // sent to `client_pub` in the meantime (e.g. from an early keypress)
+    // just queues up in the channel until the handler task comes online -
+    // nothing is dropped or racy.
     tokio::task::spawn({
-        let client = client.clone();
+        let client_pub = client_pub.clone();
         let state = state.clone();
         async move {
-            cli::start_socket(&client, Some(&state), None).await;
-        }
-    });
+            let client = match client::AppClient::new()
+                .await
+                .context("construct app client")
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    tracing::error!("failed to construct Spotify client: {err:#}");
+                    return;
+                }
+            };
+            if let Err(err) = client
+                .new_session(Some(&state), true)
+                .await
+                .context("initialize new Spotify session")
+            {
+                tracing::error!("failed to initialize Spotify session: {err:#}");
+                return;
+            }
 
-    // client event handler task
-    tokio::task::spawn({
-        let state = state.clone();
-        let client = client.clone();
-        async move {
-            client::start_client_handler(&state, &client, &client_sub).await;
-        }
-    });
+            // request user data now that we're actually authenticated
+            let _ = client_pub.send(client::ClientRequest::GetCurrentUser);
+            let _ = client_pub.send(client::ClientRequest::GetUserPlaylists);
+            let _ = client_pub.send(client::ClientRequest::GetUserFollowedArtists);
+            let _ = client_pub.send(client::ClientRequest::GetUserSavedAlbums);
+            let _ = client_pub.send(client::ClientRequest::GetContext(
+                state::ContextId::Tracks(state::USER_LIKED_TRACKS_ID.to_owned()),
+            ));
+            let _ = client_pub.send(client::ClientRequest::GetUserSavedShows);
 
-    // background task that detects an invalidated session and reconnects,
-    // independent of any incoming client request
-    tokio::task::spawn({
-        let state = state.clone();
-        let client = client.clone();
-        async move {
-            client::start_session_watcher(state, client).await;
+            // client socket task (for handling CLI commands)
+            tokio::task::spawn({
+                let client = client.clone();
+                let state = state.clone();
+                async move {
+                    cli::start_socket(&client, Some(&state), None).await;
+                }
+            });
+
+            // client event handler task
+            tokio::task::spawn({
+                let state = state.clone();
+                let client = client.clone();
+                async move {
+                    client::start_client_handler(&state, &client, &client_sub).await;
+                }
+            });
+
+            // background task that detects an invalidated session and reconnects,
+            // independent of any incoming client request
+            tokio::task::spawn({
+                let state = state.clone();
+                let client = client.clone();
+                async move {
+                    client::start_session_watcher(state, client).await;
+                }
+            });
         }
     });
+    // --- CUSTOM PATCH END ---
 
     // player event watcher task
     std::thread::Builder::new()

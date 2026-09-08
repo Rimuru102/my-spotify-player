@@ -88,7 +88,6 @@ fn handle_mouse_event(
                 }
             }
         }
-        // a left click event
         crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
             let rect = state.ui.lock().playback_progress_bar_rect;
             if event.row == rect.y && event.column >= rect.x && event.column < rect.x + rect.width {
@@ -108,8 +107,88 @@ fn handle_mouse_event(
                         chrono::Duration::try_milliseconds(position_ms).unwrap(),
                     )))?;
                 }
+            } else {
+                // --- CUSTOM PATCH START ---
+                // Prefer the exact rect of the currently-focused list/table
+                // (state.ui.active_list_rect, captured at the point each page
+                // actually renders it in ui/page.rs) so we account for that
+                // page's own header row/description line/borders. Falls back
+                // to the coarser content_area_rect for pages with no
+                // selectable list (e.g. Lyrics, Queue), where clicks are
+                // simply ignored below since there's nothing to select there
+                // anyway.
+                let ui_guard = state.ui.lock();
+                let hit = ui_guard.active_list_rect.map(|a| (a.rect, a.header_rows))
+                    .unwrap_or((ui_guard.content_area_rect, 0));
+                drop(ui_guard);
+                let (list_rect, header_rows) = hit;
+                let first_row = list_rect.y + header_rows;
+                let in_bounds = event.row >= first_row
+                    && event.row < list_rect.y + list_rect.height
+                    && event.column >= list_rect.x
+                    && event.column < list_rect.x + list_rect.width;
+
+                if in_bounds {
+                    // 1. Calculate the visual row index
+                    let index = (event.row - first_row) as usize;
+                    
+                    // 2. Update the selection state in the current UI page
+                    let mut ui = state.ui.lock();
+                    ui.current_page_mut().select(index);
+                    
+                    // MUST drop the lock before calling handle_key_event to prevent deadlocks
+                    drop(ui); 
+
+                    // 3. Dispatch Enter to trigger ChooseSelected on the new selection
+                    let enter_event = crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Enter,
+                        crossterm::event::KeyModifiers::empty(),
+                    );
+                    handle_key_event(enter_event, client_pub, state)?;
+                }
+                // --- CUSTOM PATCH END ---
             }
         }
+        // --- CUSTOM PATCH START: right-click -> "actions" popup (ncspot-style) ---
+        // Reuses the exact same command the "a"/"C-a" keybind already triggers
+        // (Command::ShowActionsOnSelectedItem), so every action already wired up
+        // in handle_action_in_context (like, add to playlist, go to album, go to
+        // radio, copy link, etc.) works here for free. We just need to move the
+        // selection cursor to whatever row was clicked first.
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
+            let mut ui = state.ui.lock();
+            let hit = ui.active_list_rect.map(|a| (a.rect, a.header_rows))
+                .unwrap_or((ui.content_area_rect, 0));
+            let (list_rect, header_rows) = hit;
+            let first_row = list_rect.y + header_rows;
+            let in_bounds = event.row >= first_row
+                && event.row < list_rect.y + list_rect.height
+                && event.column >= list_rect.x
+                && event.column < list_rect.x + list_rect.width;
+
+            if in_bounds {
+                let index = (event.row - first_row) as usize;
+                ui.current_page_mut().select(index);
+
+                // Remember exactly where the click landed so the popup can open
+                // right there instead of always docking to the bottom of the
+                // screen. Cleared automatically once the popup closes (see the
+                // ui/popup.rs snippet in chat).
+                ui.mouse_popup_anchor = Some((event.column, event.row));
+
+                // Trigger the same handler the keybind uses. We keep the same `ui`
+                // lock the whole time (unlike the left-click path) because
+                // handle_global_command takes `&mut ui` directly instead of
+                // re-entering handle_key_event, so there's no relocking/deadlock risk.
+                handle_global_command(
+                    Command::ShowActionsOnSelectedItem,
+                    client_pub,
+                    state,
+                    &mut ui,
+                )?;
+            }
+        }
+        // --- CUSTOM PATCH END ---
         _ => {}
     }
     Ok(())
@@ -630,10 +709,12 @@ fn handle_global_command(
             }
         }
         Command::OpenCommandHelp => {
-            ui.new_page(PageState::CommandHelp { scroll_offset: 0 });
+            ui.switch_to_page(PageType::CommandHelp, || PageState::CommandHelp {
+                scroll_offset: 0,
+            });
         }
         Command::OpenLogs => {
-            ui.new_page(PageState::Logs { scroll_offset: 0 });
+            ui.switch_to_page(PageType::Logs, || PageState::Logs { scroll_offset: 0 });
         }
         Command::RefreshPlayback => {
             client_pub.send(ClientRequest::GetCurrentPlayback)?;
@@ -726,24 +807,29 @@ fn handle_global_command(
             )))?;
         }
         Command::LibraryPage => {
-            ui.new_page(PageState::Library {
+            ui.switch_to_page(PageType::Library, || PageState::Library {
                 state: LibraryPageUIState::new(),
             });
         }
         Command::SearchPage => {
-            ui.new_page(PageState::Search {
+            ui.switch_to_page(PageType::Search, || PageState::Search {
                 line_input: LineInput::default(),
                 current_query: String::new(),
                 state: SearchPageUIState::new(),
             });
         }
         Command::BrowsePage => {
-            ui.new_page(PageState::Browse {
+            // Only fetch categories the first time - reusing an existing
+            // Browse page (e.g. jumping back to it with F3) shouldn't refire
+            // this request every time; the data's already cached.
+            let is_new = ui.switch_to_page(PageType::Browse, || PageState::Browse {
                 state: BrowsePageUIState::CategoryList {
                     state: ListState::default(),
                 },
             });
-            client_pub.send(ClientRequest::GetBrowseCategories)?;
+            if is_new {
+                client_pub.send(ClientRequest::GetBrowseCategories)?;
+            }
         }
         Command::PreviousPage => {
             if ui.history.len() > 1 {
@@ -851,7 +937,7 @@ fn handle_global_command(
             }
         }
         Command::Queue => {
-            ui.new_page(PageState::Queue { scroll_offset: 0 });
+            ui.switch_to_page(PageType::Queue, || PageState::Queue { scroll_offset: 0 });
             client_pub.send(ClientRequest::GetCurrentUserQueue)?;
         }
         Command::CreatePlaylist => {

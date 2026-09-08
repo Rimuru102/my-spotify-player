@@ -22,7 +22,13 @@ pub fn render_popup(
     rect: Rect,
 ) -> (Rect, bool) {
     match ui.popup {
-        None => (rect, true),
+        None => {
+            // Popup is gone (however it was closed - Esc, choosing an action,
+            // clicking elsewhere) - drop any stale click position so the next
+            // popup doesn't accidentally reuse an old anchor.
+            ui.mouse_popup_anchor = None;
+            (rect, true)
+        }
         Some(ref popup) => match popup {
             PopupState::PlaylistCreate {
                 name,
@@ -73,18 +79,24 @@ pub fn render_popup(
                 (chunks[0], true)
             }
             PopupState::ActionList(item, _) => {
-                let rect = render_list_popup(
-                    frame,
-                    rect,
-                    &format!("Actions on {}", item.name()),
-                    item.actions_desc()
-                        .into_iter()
-                        .enumerate()
-                        .map(|(id, d)| (format!("[{id}] {d}"), false))
-                        .collect(),
-                    item.n_actions() as u16 + 2, // 2 for top/bot paddings
-                    ui,
-                );
+                let title = format!("Actions on {}", item.name());
+                let items = item
+                    .actions_desc()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, d)| (format!("[{id}] {d}"), false))
+                    .collect::<Vec<_>>();
+                let height = item.n_actions() as u16 + 2; // 2 for top/bot paddings
+
+                let rect = match ui.mouse_popup_anchor {
+                    // Opened via right-click: render right where the user clicked.
+                    Some((x, y)) => {
+                        render_positioned_list_popup(frame, rect, x, y, &title, items, height, ui)
+                    }
+                    // Opened via keyboard (the "a" keybind): keep the original
+                    // bottom-docked behavior.
+                    None => render_list_popup(frame, rect, &title, items, height, ui),
+                };
                 (rect, false)
             }
             PopupState::DeviceList { .. } => {
@@ -249,6 +261,65 @@ fn render_list_popup(
     );
 
     chunks[0]
+}
+
+/// Same as `render_list_popup`, but anchored at a specific (column, row) -
+/// i.e. wherever the user right-clicked - instead of always docking to the
+/// bottom of `rect`. The popup is clamped to stay fully inside `rect` so it
+/// never gets cut off by the edge of the terminal.
+fn render_positioned_list_popup(
+    frame: &mut Frame,
+    rect: Rect,
+    click_x: u16,
+    click_y: u16,
+    title: &str,
+    items: Vec<(String, bool)>,
+    height: u16,
+    ui: &mut UIStateGuard,
+) -> Rect {
+    // Pick a reasonable width: wide enough for the title and the longest
+    // item, capped so it doesn't dominate a small terminal.
+    let content_width = items
+        .iter()
+        .map(|(s, _)| s.chars().count())
+        .chain(std::iter::once(title.chars().count()))
+        .max()
+        .unwrap_or(20) as u16
+        + 4; // borders + padding
+    let width = content_width.clamp(20, rect.width.max(20));
+    let height = height.min(rect.height.max(1));
+
+    // Anchor the top-left corner at the click position, then clamp so the
+    // whole popup stays within `rect`'s bounds.
+    let x = click_x.min(rect.x + rect.width.saturating_sub(width));
+    let y = click_y.min(rect.y + rect.height.saturating_sub(height));
+    let x = x.max(rect.x);
+    let y = y.max(rect.y);
+
+    let popup_rect = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    let inner_rect = construct_and_render_block(title, &ui.theme, Borders::ALL, frame, popup_rect);
+    let selected_index = ui.popup.as_ref().and_then(PopupState::list_selected);
+    let (list, len) = utils::construct_list_widget(&ui.theme, items, true, selected_index);
+
+    utils::render_list_window(
+        frame,
+        list,
+        inner_rect,
+        len,
+        ui.popup.as_mut().unwrap().list_state_mut().unwrap(),
+    );
+
+    // The rest of the screen (everything outside the small popup box) is what
+    // the caller treats as "still visible main layout area" - for a
+    // corner-anchored popup that's effectively the whole original rect, since
+    // we don't want the page underneath to reflow around a floating box.
+    rect
 }
 
 /// Render a shortcut help popup to show the available shortcuts based on user's inputs

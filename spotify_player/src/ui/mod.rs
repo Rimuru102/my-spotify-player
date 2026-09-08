@@ -144,6 +144,14 @@ fn render_application(frame: &mut Frame, state: &SharedState, ui: &mut UIStateGu
     // See: https://github.com/aome510/spotify-player/issues/498
     let rect = playback::render_playback_window(frame, state, ui, rect);
 
+    // Remember where the main content area starts (accounts for
+    // playback_window_position/height and terminal resizes) so mouse clicks
+    // can be translated into list rows without a hardcoded offset.
+    ui.content_area_rect = rect;
+    // Reset the precise active-list rect; the page renderer below will set it
+    // again if/when it renders a focused list or table.
+    ui.active_list_rect = None;
+
     let rect = popup::render_shortcut_help_popup(frame, ui, rect);
 
     let (rect, is_active) = popup::render_popup(frame, state, ui, rect);
