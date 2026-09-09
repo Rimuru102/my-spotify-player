@@ -95,6 +95,13 @@ pub struct AppConfig {
     pub progress_bar_type: ProgressBarType,
     pub progress_bar_position: ProgressBarPosition,
 
+    /// Don't paint the application's background using the active theme's
+    /// `background` palette color; leave it untouched (terminal default)
+    /// instead. Lets a terminal emulator's own background image/opacity
+    /// show through instead of being covered by a solid color. Purely a
+    /// rendering choice - costs nothing extra either way.
+    pub enable_transparent_background: bool,
+
     pub layout: LayoutConfig,
 
     pub genre_num: u8,
@@ -347,6 +354,7 @@ impl Default for AppConfig {
             border_type: BorderType::Plain,
             progress_bar_type: ProgressBarType::Rectangle,
             progress_bar_position: ProgressBarPosition::Bottom,
+            enable_transparent_background: false,
 
             layout: LayoutConfig::default(),
 

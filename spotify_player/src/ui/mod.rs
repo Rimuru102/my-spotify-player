@@ -62,7 +62,15 @@ pub fn run(state: &SharedState, mut terminal: Terminal) -> Result<()> {
             if let Err(err) = terminal.draw(|frame| {
                 // set the background and foreground colors for the application
                 let rect = frame.area();
-                let block = Block::default().style(ui.theme.app());
+                let mut app_style = ui.theme.app();
+                if config::get_config().app_config.enable_transparent_background {
+                    // Drop the background color only, keeping any foreground/text
+                    // color from the theme intact - this leaves the terminal's own
+                    // background (image, transparency/opacity, etc) untouched instead
+                    // of painting over it with the theme's solid `background` color.
+                    app_style.bg = None;
+                }
+                let block = Block::default().style(app_style);
                 frame.render_widget(block, rect);
 
                 render_application(frame, state, &mut ui, rect);

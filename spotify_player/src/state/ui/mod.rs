@@ -70,10 +70,6 @@ pub struct UIState {
     /// focusable list (e.g. Lyrics page). Reset every frame before rendering,
     /// so a stale rect from a previous page can't leak into hit-testing.
     pub active_list_rect: Option<ActiveListRect>,
-    /// Terminal coordinates of the last right-click, if a popup opened because
-    /// of it. Lets the popup render anchored at the click instead of always
-    /// docking to the bottom of the screen. Cleared once the popup closes.
-    pub mouse_popup_anchor: Option<(u16, u16)>,
 
     /// Count prefix for vim-style navigation (e.g., 5j, 10k)
     pub count_prefix: Option<usize>,
@@ -187,7 +183,6 @@ impl Default for UIState {
             playback_progress_bar_rect: Rect::default(),
             content_area_rect: Rect::default(),
             active_list_rect: None,
-            mouse_popup_anchor: None,
 
             count_prefix: None,
 

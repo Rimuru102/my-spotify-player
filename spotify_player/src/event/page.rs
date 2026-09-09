@@ -85,7 +85,7 @@ fn handle_action_for_library_page(
     }
 }
 
-fn handle_command_for_library_page(
+pub(super) fn handle_command_for_library_page(
     command: Command,
     client_pub: &flume::Sender<ClientRequest>,
     ui: &mut UIStateGuard,
@@ -356,7 +356,7 @@ fn handle_key_sequence_for_search_page(
     }
 }
 
-fn handle_command_for_context_page(
+pub(super) fn handle_command_for_context_page(
     command: Command,
     client_pub: &flume::Sender<ClientRequest>,
     ui: &mut UIStateGuard,
@@ -457,7 +457,7 @@ fn handle_action_for_browse_page(
     }
 }
 
-fn handle_command_for_browse_page(
+pub(super) fn handle_command_for_browse_page(
     command: Command,
     client_pub: &flume::Sender<ClientRequest>,
     ui: &mut UIStateGuard,

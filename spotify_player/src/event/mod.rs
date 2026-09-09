@@ -131,13 +131,13 @@ fn handle_mouse_event(
                 if in_bounds {
                     // 1. Calculate the visual row index
                     let index = (event.row - first_row) as usize;
-                    
+
                     // 2. Update the selection state in the current UI page
                     let mut ui = state.ui.lock();
                     ui.current_page_mut().select(index);
-                    
+
                     // MUST drop the lock before calling handle_key_event to prevent deadlocks
-                    drop(ui); 
+                    drop(ui);
 
                     // 3. Dispatch Enter to trigger ChooseSelected on the new selection
                     let enter_event = crossterm::event::KeyEvent::new(
@@ -150,13 +150,17 @@ fn handle_mouse_event(
             }
         }
         // --- CUSTOM PATCH START: right-click -> "actions" popup (ncspot-style) ---
-        // Reuses the exact same command the "a"/"C-a" keybind already triggers
-        // (Command::ShowActionsOnSelectedItem), so every action already wired up
-        // in handle_action_in_context (like, add to playlist, go to album, go to
-        // radio, copy link, etc.) works here for free. We just need to move the
-        // selection cursor to whatever row was clicked first.
+        // Selects whatever row is under the cursor, then opens the same
+        // "actions on selected item" popup as the `g a` / `C-space` keybind -
+        // rendered the normal (bottom-docked, keyboard-navigable) way, exactly
+        // like the popup already works everywhere else.
         crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
             let mut ui = state.ui.lock();
+            if ui.popup.is_some() {
+                // A popup is already open - right-clicking again shouldn't reach
+                // through it and re-select a row on the page behind.
+                return Ok(());
+            }
             let hit = ui.active_list_rect.map(|a| (a.rect, a.header_rows))
                 .unwrap_or((ui.content_area_rect, 0));
             let (list_rect, header_rows) = hit;
@@ -170,22 +174,41 @@ fn handle_mouse_event(
                 let index = (event.row - first_row) as usize;
                 ui.current_page_mut().select(index);
 
-                // Remember exactly where the click landed so the popup can open
-                // right there instead of always docking to the bottom of the
-                // screen. Cleared automatically once the popup closes (see the
-                // ui/popup.rs snippet in chat).
-                ui.mouse_popup_anchor = Some((event.column, event.row));
-
-                // Trigger the same handler the keybind uses. We keep the same `ui`
-                // lock the whole time (unlike the left-click path) because
-                // handle_global_command takes `&mut ui` directly instead of
-                // re-entering handle_key_event, so there's no relocking/deadlock risk.
-                handle_global_command(
-                    Command::ShowActionsOnSelectedItem,
-                    client_pub,
-                    state,
-                    &mut ui,
-                )?;
+                // `ShowActionsOnSelectedItem` is a page-specific command (it needs to
+                // know which item is selected in the currently-focused window), so it
+                // isn't handled by `handle_global_command` - that's only for commands
+                // that make sense regardless of the current page (Quit, NextTrack,
+                // etc). Dispatch it exactly the way the `g a` / `C-space` keybind does:
+                // through the per-page-type handler for whichever page is active.
+                match ui.current_page().page_type() {
+                    PageType::Library => {
+                        page::handle_command_for_library_page(
+                            Command::ShowActionsOnSelectedItem,
+                            client_pub,
+                            &mut ui,
+                            state,
+                        )?;
+                    }
+                    PageType::Context => {
+                        page::handle_command_for_context_page(
+                            Command::ShowActionsOnSelectedItem,
+                            client_pub,
+                            &mut ui,
+                            state,
+                        )?;
+                    }
+                    PageType::Browse => {
+                        page::handle_command_for_browse_page(
+                            Command::ShowActionsOnSelectedItem,
+                            client_pub,
+                            &mut ui,
+                            state,
+                        )?;
+                    }
+                    // Other pages (Lyrics, Queue, Search, CommandHelp, Logs) don't
+                    // support an actions popup on a selected item.
+                    _ => {}
+                }
             }
         }
         // --- CUSTOM PATCH END ---

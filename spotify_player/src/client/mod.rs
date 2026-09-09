@@ -155,20 +155,34 @@ impl AppClient {
                 // if there is no playback, connect to an available device
                 //
                 // However, because it takes time for Spotify server to show up new changes,
-                // a retry logic is implemented to ensure the application's state is properly initialized
-                let delay = std::time::Duration::from_secs(1);
+                // a retry logic is implemented to ensure the application's state is properly initialized.
+                //
+                // The integrated (librespot) device in particular can take a while to finish
+                // registering itself with Spotify's servers on a cold start (see
+                // `ensure_integrated_device`/issue #79), so a short 5x1s retry window isn't always
+                // enough - the loop below gave up before the device ever showed up, leaving
+                // the app stuck on "Loading..." until the user manually opened `SwitchDevice`.
+                // We retry for longer (up to ~45s total) with a small backoff, which costs
+                // nothing but a few sleeping timers (no polling/CPU usage) while waiting.
+                let mut delay = std::time::Duration::from_secs(1);
+                const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(4);
 
-                for _ in 0..5 {
+                for _ in 0..12 {
                     tokio::time::sleep(delay).await;
+                    // back off gradually so later retries (giving the integrated device
+                    // more time to register) don't hammer the Web API
+                    delay = std::cmp::min(delay * 2, MAX_DELAY);
 
                     if let Err(err) = client.retrieve_current_playback(&state, false).await {
                         tracing::error!("Failed to retrieve current playback: {err:#}");
                         return;
                     }
 
-                    // if playback exists, don't connect to a new device
+                    // if playback exists, don't connect to a new device, and stop retrying -
+                    // there's nothing left to do, so keep looping here would just waste
+                    // timers/Web API calls for no benefit
                     if state.player.read().playback.is_some() {
-                        continue;
+                        break;
                     }
 
                     let id = match client.find_available_device().await {
@@ -331,7 +345,16 @@ impl AppClient {
                 if let (Some(shuffle), Some(playback)) = (shuffle, playback.as_mut()) {
                     playback.shuffle_state = shuffle;
                 }
-                let device_id = playback.as_ref().and_then(|p| p.device_id.as_deref());
+                let mut device_id = playback.as_ref().and_then(|p| p.device_id.clone());
+                if device_id.is_none() {
+                    // No known active device yet - this happens right after startup, before
+                    // the integrated device has finished registering with Spotify, or if the
+                    // user never had any playback. Calling the Web API with no device silently
+                    // fails (NO_ACTIVE_DEVICE) and looks like "nothing happens" when picking a
+                    // song, so resolve (and implicitly register) a device on demand instead.
+                    device_id = self.find_available_device().await.unwrap_or_default();
+                }
+                let device_id = device_id.as_deref();
                 self.start_playback(p, device_id).await?;
                 // For some reasons, when starting a new playback, the integrated `spotify_player`
                 // client doesn't respect the initial shuffle state, so we need to manually update the state
